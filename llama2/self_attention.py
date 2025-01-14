@@ -1,7 +1,9 @@
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from model_args import ModelArgs
-from utils import apply_rotary_embedings
+from utils import apply_rotary_embedings, repeat_kv
 
 class SelfAttention(nn.Module):
 
@@ -46,3 +48,32 @@ class SelfAttention(nn.Module):
         xq = apply_rotary_embedings(xq, freqs_complex, device=x.device)
         xk = apply_rotary_embedings(xk, freqs_complex, device=x.device)
         
+        # Replace the entry in the cache for this token
+        self.cache_k[: batch_size, start_pos : start_pos + seq_len] = xk
+        self.cache_v[: batch_size, start_pos : start_pos + seq_len] = xv
+
+        # Retrieve all the cached keys and values so far
+        # (B, seq_len_kv, H_KV, head_dim)
+        keys = self.cache_k[: batch_size, 0 : start_pos + seq_len]
+        values = self.cache_v[: batch_size, 0 : start_pos + seq_len]
+
+        # Repeat the heads of the K & V to reach the number of heads of the queries
+        keys = repeat_kv(keys, self.n_rep)
+        values = repeat_kv(values, self.n_rep)
+
+        # (B, 1, H_Q, head_dim) -> (B, H_Q, 1, head_dim)
+        xq = xq.transpose(1, 2)
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
+
+        # (B, H_Q, 1, head_dim) @ (B, H_Q, head_dim, seq_len_kv) -> (B, H_Q, 1 , seq_len_kv)
+        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+
+        # (B, H_Q, 1, seq_len) @ (B, H_Q, seq_len_kv, head_dim) -> (B, H_Q, 1 , head_dim) 
+        output = torch.matmul(scores, values)
+
+        # (B, H_Q, 1 , head_dim) -> (B, 1, H_Q, head_dim) -> (B, 1, dim)
+        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
+
+        return self.wo(output) # (B, 1, dim) -> (B, 1, dim)
