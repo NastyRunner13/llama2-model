@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from rmsnorm import RMSNorm
 from model_args import ModelArgs
+from feedforward import FeedForward
 from self_attention import SelfAttention
 
 class EncoderBlock(nn.Module):
